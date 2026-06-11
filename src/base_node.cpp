@@ -56,6 +56,23 @@ void RlInferNodeBase::finish_setup() {
               "inference backend = C++/Eigen (rl_infer_cpp — no Python at "
               "runtime; same MLP math as the deployed NumPy backend)");
 
+  // Readiness heartbeat (commander rrr/ggg interlock): publish state_ready()
+  // at 10 Hz on /rl/ready/<required_source>. The commander's own GT-feed
+  // check runs in a different process and cannot see whether THIS node's obs
+  // subscription is matched/receiving (DDS discovery is per-process;
+  // 2026-06-11 real flight: commander's feed live, gate node starved at zero
+  // messages). Also a liveness heartbeat: a dead/stalled node stops
+  // publishing and the commander refuses on staleness.
+  pub_ready_ = create_publisher<std_msgs::msg::Bool>(
+      "/rl/ready/" + (required_source_.empty() ? std::string("any")
+                                               : required_source_),
+      10);
+  ready_timer_ = create_wall_timer(std::chrono::milliseconds(100), [this] {
+    std_msgs::msg::Bool m;
+    m.data = state_ready();
+    pub_ready_->publish(m);
+  });
+
   timer_ = create_wall_timer(
       std::chrono::duration<double>(1.0 / inference_rate_),
       std::bind(&RlInferNodeBase::tick, this));

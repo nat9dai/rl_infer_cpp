@@ -21,6 +21,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include <px4_msgs/msg/vehicle_rates_setpoint.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float32.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <std_msgs/msg/int32.hpp>
@@ -117,6 +118,8 @@ class RlInferNodeBase : public rclcpp::Node {
   rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr sub_fsm_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_source_;
   rclcpp::Publisher<px4_msgs::msg::VehicleRatesSetpoint>::SharedPtr pub_rates_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_ready_;
+  rclcpp::TimerBase::SharedPtr ready_timer_;
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr pub_dbg_obs_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr pub_dbg_infer_time_;
   std::map<std::string,
