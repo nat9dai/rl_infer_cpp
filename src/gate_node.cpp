@@ -91,6 +91,7 @@ class GateCppNode : public RlInferNodeBase {
           + gt_source + "'");
     }
 
+    gt_topic_desc_ = gt_source + ":" + gt_topic;
     RCLCPP_INFO(get_logger(),
                 "Gate scene: gate_pos=(%.3f, %.3f, %.3f) goal_pos=(%.3f, %.3f,"
                 " %.3f) | pose source=%s topic=%s child=%s",

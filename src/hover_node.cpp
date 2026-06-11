@@ -103,6 +103,7 @@ class HoverCppNode : public RlInferNodeBase {
           "hover_jax_node (cpp): gt_source must be odom|pose|vrpn — the "
           "deprecated 'px4' EKF path is not ported (use the Python node).");
     }
+    gt_topic_desc_ = gt_source_ + ":" + gt_topic;
     RCLCPP_INFO(get_logger(),
                 "PX4 EKF feedback subs DISABLED (no /fmu/out/vehicle_odometry,"
                 " no /fmu/out/esc_status) — obs sourced from %s '%s'.",

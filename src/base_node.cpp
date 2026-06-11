@@ -79,8 +79,8 @@ void RlInferNodeBase::tick() {
       gt_block_warn_mono_ = now;
       RCLCPP_WARN(get_logger(),
                   "RL engage BLOCKED: observation source not available "
-                  "(no/stale ground-truth pose). NOT running the policy — "
-                  "check the obs feed (gz odom / VRPN mocap).");
+                  "(no/stale ground-truth pose). NOT running the policy. %s",
+                  gt_feed_status().c_str());
     }
   }
 

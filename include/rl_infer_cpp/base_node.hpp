@@ -68,7 +68,26 @@ class RlInferNodeBase : public rclcpp::Node {
   }
 
   // ---- helpers for task nodes ----
-  void note_gt_received() { gt_recv_mono_ = mono_now(); }
+  void note_gt_received() {
+    gt_recv_mono_ = mono_now();
+    ++gt_msg_count_;
+  }
+  // One-line GT feed status for the engage-BLOCKED warning: distinguishes
+  // "never received ANY message" (wrong topic / publisher down) from "stale"
+  // (bursty/intermittent feed). Task nodes set gt_topic_desc_ at startup.
+  std::string gt_feed_status() const {
+    if (gt_msg_count_ == 0)
+      return "feed '" + gt_topic_desc_ + "': ZERO messages ever received — "
+             "wrong topic name, publisher not running, or QoS/discovery";
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "feed '%s': %ld msgs total, last %.2fs ago (gt_timeout %.2fs) — "
+             "intermittent/bursty source",
+             gt_topic_desc_.c_str(), static_cast<long>(gt_msg_count_),
+             mono_now() - gt_recv_mono_, gt_timeout_);
+    return std::string(buf);
+  }
+  std::string gt_topic_desc_ = "?";
   bool gt_fresh() const {
     if (gt_timeout_ <= 0.0) return true;
     return gt_recv_mono_ >= 0.0 && (mono_now() - gt_recv_mono_) < gt_timeout_;
@@ -116,6 +135,7 @@ class RlInferNodeBase : public rclcpp::Node {
   double gt_timeout_ = 0.3;
   double gt_recv_mono_ = -1.0;
   double gt_block_warn_mono_ = 0.0;
+  int64_t gt_msg_count_ = 0;
 
   std::vector<float> obs_buf_;
 };
