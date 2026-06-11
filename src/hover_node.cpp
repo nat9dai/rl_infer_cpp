@@ -55,6 +55,13 @@ class HoverCppNode : public RlInferNodeBase {
     declare_parameter<std::string>("gt_source", "odom");
     declare_parameter<std::string>("gt_pose_topic",
                                    "/model/charpi_vision_0/odometry");
+    // Min stamp dt for the velocity/ang-vel finite-diff. Real VRPN clients
+    // emit burst near-duplicates (~1mm REAL pose delta, stamps 0.01-1 ms
+    // apart -> 5-80 m/s obs spikes; measured in rec_20260611_185438). Below
+    // the floor the pose is stored but the previous velocity kept. Half the
+    // 120Hz frame period; gz odom (125Hz) and mocap frames always pass.
+    declare_parameter<double>("gt_min_dt", 0.004);
+    gt_min_dt_ = get_parameter("gt_min_dt").as_double();
 
     HoverActionScale scale;
     scale.min_throttle = get_parameter("min_throttle").as_double();
@@ -226,7 +233,7 @@ class HoverCppNode : public RlInferNodeBase {
   void store_gt(const Vec3& new_pos, const Vec4& new_q, double t_sec) {
     if (gt_ready_ && has_gt_stamp_) {
       const double dt = t_sec - gt_stamp_;
-      if (dt > 1e-4) {
+      if (dt >= gt_min_dt_) {
         gt_vel_ = (new_pos - gt_pos_) / dt;
         Vec4 qd = quat_mul(quat_inv(gt_quat_wxyz_), new_q);
         if (qd[0] < 0.0) qd = -qd;
@@ -282,6 +289,7 @@ class HoverCppNode : public RlInferNodeBase {
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_gt_odom_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_gt_pose_;
 
+  double gt_min_dt_ = 0.004;
   Vec3 gt_pos_ = Vec3::Zero(), gt_vel_ = Vec3::Zero(),
        gt_ang_vel_ = Vec3::Zero();
   Vec4 gt_quat_wxyz_ = Vec4(1, 0, 0, 0);

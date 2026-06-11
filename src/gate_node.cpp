@@ -46,6 +46,10 @@ class GateCppNode : public RlInferNodeBase {
     declare_parameter<std::string>("gt_source", "tf");
     declare_parameter<std::string>("gt_pose_topic", "/gate/gt_pose");
     declare_parameter<std::string>("gt_child_frame", "charpi_vision_0");
+    // Min stamp dt for the velocity finite-diff — guards against VRPN burst
+    // near-duplicates (see hover_node.cpp gt_min_dt for the measured data).
+    declare_parameter<double>("gt_min_dt", 0.004);
+    gt_min_dt_ = get_parameter("gt_min_dt").as_double();
 
     const auto gp = get_parameter("gate_pos_enu").as_double_array();
     const auto sp = get_parameter("standby_pos_enu").as_double_array();
@@ -195,7 +199,7 @@ class GateCppNode : public RlInferNodeBase {
     // World velocity = clean GT position finite-diff with the REAL message dt.
     if (gt_ready_ && has_gt_stamp_) {
       const double dt = t_sec - gt_stamp_;
-      if (dt > 1e-4) gt_vel_ = (new_pos - gt_pos_) / dt;
+      if (dt >= gt_min_dt_) gt_vel_ = (new_pos - gt_pos_) / dt;
     }
     gt_pos_ = new_pos;
     gt_quat_wxyz_ = Vec4(qw, qx, qy, qz);  // ROS xyzw -> Hamilton wxyz
@@ -266,6 +270,7 @@ class GateCppNode : public RlInferNodeBase {
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_gt_pose_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_gt_odom_;
 
+  double gt_min_dt_ = 0.004;
   Vec3 gt_pos_ = Vec3::Zero(), gt_vel_ = Vec3::Zero();
   Vec4 gt_quat_wxyz_ = Vec4(1, 0, 0, 0);
   bool gt_ready_ = false, has_gt_stamp_ = false;
