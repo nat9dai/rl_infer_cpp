@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>rl_infer_cpp</name>
+  <version>0.1.0</version>
+  <description>
+    C++ port of the rl_infer JAX/NumPy inference nodes (hover_jax_node,
+    gate_jax_node). Pure Eigen MLP forward pass loading .npw weight files
+    exported from the deploy .pkl checkpoints by
+    rl_infer/scripts/export_policy_cpp.py. No Python, jax, flax or numpy at
+    runtime — built for the Jetson Orin (ROS 2 Foxy) and x86 SITL (Humble).
+  </description>
+  <maintainer email="nuthasith.g@gmail.com">nat-nus</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>px4_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>tf2_msgs</depend>
+  <depend>eigen</depend>
+  <depend>ament_index_cpp</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
