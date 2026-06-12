@@ -1,13 +1,7 @@
-// math_util.hpp: C++ port of rl_infer/util/math.py (+ the gate task's
-// scalar-last quaternion helpers from rl_infer/gate/task.py).
-//
-// All math is done in DOUBLE precision exactly like the Python reference
-// (which computes in float64 and casts the obs terms to float32 at the end),
-// so the produced observations agree to float32 rounding.
-//
-// Quaternion conventions (mirrors the Python stack):
-//   * Hamilton [w, x, y, z] : used by the hover task / util/math.py
-//   * scalar-last [x, y, z, w]: used by the gate task (dva_utils.jax_utils)
+// math_util.hpp: C++ port of rl_infer/util/math.py + the gate task's
+// scalar-last quaternion helpers. Double math like the Python reference, so
+// observations agree to float32 rounding. Quaternion conventions: Hamilton
+// [w,x,y,z] for the hover task; scalar-last [x,y,z,w] for the gate task.
 #pragma once
 
 #include <Eigen/Dense>

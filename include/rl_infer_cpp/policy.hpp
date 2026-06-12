@@ -1,15 +1,7 @@
-// policy.hpp: Eigen MLP forward pass over .npw weight files exported by
-// rl_infer/scripts/export_policy_cpp.py (see that file for the format spec).
-//
-// Replicates the deployed pure-NumPy backend of JaxPolicyRunner op-for-op in
-// float32:
-//   arch 0 (converted_pt / IsaacLab hover):
-//     x=(x-mean)/denom; per layer x=ELU(xW+b); out clip(xW+b, -1, 1)
-//   arch 1 (dva-quad-jax Flax / gate):
-//     x=(x-mean)/denom; per layer x=LayerNorm(ELU(xW+b)); out tanh(xW+b)
-//   ELU(x) = x>0 ? x : expm1(x);  LayerNorm eps 1e-6, var=max(E[x²]-E[x]², 0)
-//
-// No heap allocation in infer() (scratch buffers preallocated at load).
+// policy.hpp: Eigen MLP forward pass over .npw weights exported by
+// rl_infer/scripts/export_policy_cpp.py (format spec lives there). Replicates
+// the deployed NumPy backend op-for-op in float32: arch 0 = ELU MLP + clip
+// (hover); arch 1 = Flax ELU+LayerNorm + tanh (gate). No heap in infer().
 #pragma once
 
 #include <sys/stat.h>
@@ -35,8 +27,8 @@ class PolicyMlp {
     check_not_stale(path);
     std::FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) throw std::runtime_error("PolicyMlp: cannot open " + path);
-    // RAII guard: every throw below would otherwise leak the handle (the gate
-    // node catches per-roll checkpoint load failures and keeps running).
+    // RAII close: the throws below must not leak the handle (gate node
+    // catches per-roll load failures and keeps running).
     struct FileCloser {
       void operator()(std::FILE* fp) const { std::fclose(fp); }
     };
@@ -76,9 +68,8 @@ class PolicyMlp {
     guard.reset();  // close now; nothing below reads the file
     if (out != num_act_)
       throw std::runtime_error("PolicyMlp: output dim mismatch in " + path);
-    // Dim-chain validation: a corrupt dims field that still parses would
-    // otherwise make infer() read past the scratch buffer (silent UB in the
-    // Release build; numpy fails loudly on the same input).
+    // Validate the layer dim chain: a corrupt dims field would otherwise
+    // make infer() read past the scratch buffer (silent UB).
     uint32_t prev = num_obs_;
     for (const auto& w : W_) {
       if (static_cast<uint32_t>(w.rows()) != prev)
@@ -98,9 +89,8 @@ class PolicyMlp {
     path_ = path;
   }
 
-  // obs: num_obs floats. Returns pointer to num_act floats (valid until the
-  // next call). Thread-compatible only with external locking (single caller
-  // in the node's timer thread).
+  // obs: num_obs floats. Returns num_act floats valid until the next call.
+  // Not thread-safe (single caller in the node's timer thread).
   const float* infer(const float* obs) {
     Eigen::Map<const RowVec> x_in(obs, num_obs_);
     RowVec* cur = &scratch_a_;
@@ -158,10 +148,8 @@ class PolicyMlp {
   }
 
  private:
-  // Staleness guard: the .npw is EXPORTED from a deploy .pkl; if the sibling
-  // .pkl is NEWER than the .npw, the checkpoint was retrained but never
-  // re-exported: flying the old weights silently is exactly the mistake this
-  // refuses. (No .pkl next to the .npw is fine: npw-only deployment.)
+  // Refuse an .npw older than its sibling .pkl (retrained but never
+  // re-exported). No .pkl sibling is fine (npw-only deployment).
   static void check_not_stale(const std::string& npw_path) {
     const std::string ext = ".npw";
     if (npw_path.size() < ext.size()

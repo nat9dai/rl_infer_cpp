@@ -1,26 +1,9 @@
 // validate_main.cpp: offline numerical validation + latency benchmark for
 // the C++ inference port. No ROS.
-//
-//   rl_validate replay <vectors.bin> <policy.npw>
-//       Replays a test-vector file produced by
-//       rl_infer/test/cpp/gen_vectors.py: drives the C++ task logic + policy
-//       closed-loop (last_action tracked internally, like the node) and
-//       compares obs / raw action / scaled command against the Python NumPy
-//       reference at every step. IMPORTANT: run with the same deploy env vars
-//       the generator used (the harness script sets both).
-//
-//   rl_validate bench <policy.npw> [iters]
-//       Per-inference latency stats (mean/p50/p99/max microseconds).
-//
-// Vector file layout (little-endian):
-//   char[4] "RLTV", u32 task (0 hover | 1 gate), u32 N
-//   hover header: u32 apply_yaw_offset, f64 target_pose[6]
-//   gate  header: f64 gate_pos[3], standby[3], gate_roll, goal_local[3],
-//                 accel_lpf_alpha, u32 br_filter
-//   per step:
-//     hover: f64 pos[3] vel[3] quat_wxyz[4] ang_vel[3]
-//     gate:  f64 pos[3] vel[3] quat_wxyz[4]
-//     then expected: f32 obs[num_obs], f32 raw[4], f64 cmd[4]
+// replay: closed-loop replay of rl_infer/test/cpp/gen_vectors.py vectors vs
+//   the Python reference; run with the same deploy env vars the generator
+//   used (file layout spec lives in gen_vectors.py).
+// bench: per-inference latency stats (mean/p50/p99/max microseconds).
 
 #include <algorithm>
 #include <chrono>

@@ -1,8 +1,7 @@
 // hover_task.hpp: C++ port of rl_infer/hover/task.py (HoverTaskLogic).
-// Pure logic, no ROS. Double-precision math, float32 obs output, exactly
-// mirroring the Python reference (which computes in float64 then casts).
-//
-// Deploy-config env vars (same names/defaults as the Python task):
+// Pure logic, no ROS. Double math, float32 obs output (the Python reference
+// computes in float64 then casts).
+// Env vars (same names/defaults as the Python task):
 //   HOVER_THRUST_REMAP (default 1) : cubic gz thrust-curve remap
 //   HOVER_RATE_CAP     (default 1) : per-axis cap to the SITL envelope
 //   HOVER_MAX_RATE_ROLL/PITCH/YAW   (defaults 4.0 / 2.5 / 3.0 rad/s)

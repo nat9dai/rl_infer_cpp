@@ -1,8 +1,7 @@
 // gate_node.cpp: C++ port of rl_infer/gate_jax_node.py (GateJaxNode).
-//
-// Same node name, parameters, topics and behavior as the Python node, driven
-// by the same gate_jax_params.yaml (checkpoint_path names the .pkl; the .npw
-// twin exported by rl_infer/scripts/export_policy_cpp.py is loaded).
+// Same node name, parameters, topics and behavior; driven by the same
+// gate_jax_params.yaml (checkpoint_path names the .pkl; the exported .npw
+// twin is loaded).
 
 #include <cmath>
 #include <map>
@@ -14,6 +13,8 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <px4_msgs/msg/vehicle_attitude.hpp>
+#include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <tf2_msgs/msg/tf_message.hpp>
 
@@ -46,10 +47,14 @@ class GateCppNode : public RlInferNodeBase {
     declare_parameter<std::string>("gt_source", "tf");
     declare_parameter<std::string>("gt_pose_topic", "/gate/gt_pose");
     declare_parameter<std::string>("gt_child_frame", "charpi_vision_0");
-    // Min stamp dt for the velocity finite-diff — guards against VRPN burst
-    // near-duplicates (see hover_node.cpp gt_min_dt for the measured data).
+    // Min stamp dt for the velocity finite-diff: guards VRPN burst
+    // near-duplicates.
     declare_parameter<double>("gt_min_dt", 0.004);
     gt_min_dt_ = get_parameter("gt_min_dt").as_double();
+    // Aligns the PX4 EKF local frame with the scene frame (px4 source only);
+    // calibrate /vrpn pose z vs vehicle_local_position -z on the ground.
+    declare_parameter<std::vector<double>>("gt_pos_offset_enu",
+                                           {0.0, 0.0, 0.0});
 
     const auto gp = get_parameter("gate_pos_enu").as_double_array();
     const auto sp = get_parameter("standby_pos_enu").as_double_array();
@@ -85,9 +90,22 @@ class GateCppNode : public RlInferNodeBase {
       sub_gt_odom_ = create_subscription<nav_msgs::msg::Odometry>(
           gt_topic, sensor_qos(),
           std::bind(&GateCppNode::odom_cb, this, std::placeholders::_1));
+    } else if (gt_source == "px4") {
+      // PX4 EKF state: position/velocity/acceleration from
+      // vehicle_local_position (NED) + attitude from vehicle_attitude
+      // (FRD->NED). Smooth EKF states, no finite differences anywhere.
+      const auto off = get_parameter("gt_pos_offset_enu").as_double_array();
+      ekf_pos_offset_ = Vec3(off[0], off[1], off[2]);
+      sub_ekf_lpos_ = create_subscription<px4_msgs::msg::VehicleLocalPosition>(
+          px4_ns_ + "out/vehicle_local_position", sensor_qos(),
+          std::bind(&GateCppNode::ekf_lpos_cb, this, std::placeholders::_1));
+      sub_ekf_att_ = create_subscription<px4_msgs::msg::VehicleAttitude>(
+          px4_ns_ + "out/vehicle_attitude", sensor_qos(),
+          std::bind(&GateCppNode::ekf_att_cb, this, std::placeholders::_1));
+      use_ekf_ = true;
     } else {
       throw std::runtime_error(
-          "gate_jax_node (cpp): gt_source must be tf|pose|vrpn|odom, got '"
+          "gate_jax_node (cpp): gt_source must be tf|pose|vrpn|odom|px4, got '"
           + gt_source + "'");
     }
 
@@ -107,7 +125,12 @@ class GateCppNode : public RlInferNodeBase {
   int num_obs() const override { return NUM_GATE_OBS; }
 
   void build_obs(float* obs) override {
-    task_->build_obs(gt_pos_, gt_vel_, gt_quat_wxyz_, last_action_, obs);
+    if (use_ekf_) {
+      task_->build_obs(gt_pos_, gt_vel_, gt_quat_wxyz_, last_action_, obs,
+                       &ekf_acc_enu_);
+    } else {
+      task_->build_obs(gt_pos_, gt_vel_, gt_quat_wxyz_, last_action_, obs);
+    }
   }
 
   const float* infer_raw(const float* obs) override {
@@ -118,7 +141,10 @@ class GateCppNode : public RlInferNodeBase {
     return task_->scale_action(raw);
   }
 
-  bool state_ready() override { return gt_ready_ && gt_fresh(); }
+  bool state_ready() override {
+    if (use_ekf_) return gt_ready_ && ekf_att_ready_ && gt_fresh();
+    return gt_ready_ && gt_fresh();
+  }
 
   void on_inference_start() override {
     task_->reset();
@@ -165,9 +191,8 @@ class GateCppNode : public RlInferNodeBase {
                 resolve_ckpt(ckpt).c_str(), policy_->arch_name());
 
     // Pre-load per-roll fine-tuned policies so tttN switches instantly.
-    // NOTE: as_string_array() returns a reference INTO the temporary
-    // Parameter: copy it before iterating (range-for over the temporary's
-    // innards is a dangling reference -> segfault).
+    // Copy required: as_string_array() returns a reference INTO the
+    // temporary Parameter — range-for over it dangles.
     const std::vector<std::string> specs =
         get_parameter("roll_checkpoints").as_string_array();
     for (const auto& spec : specs) {
@@ -197,7 +222,7 @@ class GateCppNode : public RlInferNodeBase {
   void store_pose(double px, double py, double pz, double qx, double qy,
                   double qz, double qw, double t_sec) {
     const Vec3 new_pos(px, py, pz);
-    // World velocity = clean GT position finite-diff with the REAL message dt.
+    // World velocity = GT position finite-diff with the REAL message dt.
     if (gt_ready_ && has_gt_stamp_) {
       const double dt = t_sec - gt_stamp_;
       if (dt >= gt_min_dt_) gt_vel_ = (new_pos - gt_pos_) / dt;
@@ -222,6 +247,26 @@ class GateCppNode : public RlInferNodeBase {
     const auto& q = msg->pose.pose.orientation;
     store_pose(p.x, p.y, p.z, q.x, q.y, q.z, q.w,
                stamp_to_sec(msg->header.stamp));
+  }
+
+  // vehicle_local_position (gt_source=px4): NED, converted to the policy's
+  // ENU world frame. Validity flags gate freshness so a degrading EKF
+  // fail-safes the policy.
+  void ekf_lpos_cb(px4_msgs::msg::VehicleLocalPosition::ConstSharedPtr m) {
+    if (!(m->xy_valid && m->z_valid && m->v_xy_valid && m->v_z_valid)) return;
+    gt_pos_ = ned_to_enu_vec(Vec3(m->x, m->y, m->z)) + ekf_pos_offset_;
+    gt_vel_ = ned_to_enu_vec(Vec3(m->vx, m->vy, m->vz));
+    ekf_acc_enu_ = ned_to_enu_vec(Vec3(m->ax, m->ay, m->az));
+    gt_ready_ = true;
+    note_gt_received();  // obs-availability freshness (safety)
+  }
+
+  // vehicle_attitude.q: Hamilton wxyz, FRD body -> NED world; converted to
+  // the policy's ENU/FLU convention.
+  void ekf_att_cb(px4_msgs::msg::VehicleAttitude::ConstSharedPtr m) {
+    const Vec4 q_ned_frd(m->q[0], m->q[1], m->q[2], m->q[3]);
+    gt_quat_wxyz_ = ned_frd_quat_to_enu_flu(q_ned_frd);
+    ekf_att_ready_ = true;
   }
 
   void tf_cb(tf2_msgs::msg::TFMessage::ConstSharedPtr msg) {
@@ -270,6 +315,11 @@ class GateCppNode : public RlInferNodeBase {
   rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr sub_gt_tf_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_gt_pose_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_gt_odom_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr
+      sub_ekf_lpos_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleAttitude>::SharedPtr sub_ekf_att_;
+  bool use_ekf_ = false, ekf_att_ready_ = false;
+  Vec3 ekf_acc_enu_ = Vec3::Zero(), ekf_pos_offset_ = Vec3::Zero();
 
   double gt_min_dt_ = 0.004;
   Vec3 gt_pos_ = Vec3::Zero(), gt_vel_ = Vec3::Zero();

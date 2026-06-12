@@ -1,13 +1,7 @@
 // base_node.hpp: C++ port of rl_infer/base_node.py (RLInferNodeBase).
-//
-// Handles everything common across tasks: FSM-state + /active_traj_source
-// gating, the inference timer, VehicleRatesSetpoint publishing (FLU -> FRD,
-// thrust_body[2] = -thrust), the RL->FSM neutral-hover handoff burst, the
-// ground-truth obs-availability safety gate, and the /dbg topics.
-//
-// C++ note vs the Python base: virtual calls don't dispatch in constructors,
-// so derived nodes do their own setup in their constructor and then call
-// finish_setup() (warm-up inference + timer) as the LAST statement.
+// Common task plumbing: FSM/source gating, inference timer, rates publishing
+// (FLU -> FRD, thrust_body[2] = -thrust), neutral-hover handoff, ground-truth
+// obs-availability safety gate, /dbg topics.
 #pragma once
 
 #include <chrono>
@@ -42,7 +36,8 @@ class RlInferNodeBase : public rclcpp::Node {
  protected:
   explicit RlInferNodeBase(const std::string& node_name);
 
-  // Derived constructor calls this LAST (policy loaded, subs created).
+  // Derived constructor calls this LAST (virtual calls don't dispatch in
+  // C++ constructors; policy loaded, subs created).
   void finish_setup();
 
   // ---- task interface ----
@@ -53,16 +48,13 @@ class RlInferNodeBase : public rclcpp::Node {
   virtual RatesCommand scale_action(const float* raw) = 0;
   virtual bool state_ready() = 0;
   virtual void on_inference_start() {}
-  // Term name -> (offset, length) slices of the obs vector for the
-  // /dbg/policy_obs/<term> topics. NOTE: content is RAW policy-frame values;
-  // the Python node publishes frame-converted (NED/FRD) debug terms: the
-  // names match, the frames differ.
+  // Term name -> (offset, length) obs slices for /dbg/policy_obs/<term>.
+  // NOTE: values are RAW policy-frame; the Python node publishes NED/FRD.
   virtual std::vector<std::pair<std::string, std::pair<int, int>>>
   obs_terms() const {
     return {};
   }
-  // Extra computed /dbg/policy_obs/<name> terms that are NOT slices of the
-  // obs vector (e.g. the hover node's lin_vel_w_ned / target_pos_w_ned).
+  // Computed /dbg/policy_obs/<name> terms that are NOT slices of the obs.
   virtual std::vector<std::pair<std::string, std::vector<float>>>
   derived_dbg_terms(const float* /*obs*/) const {
     return {};
@@ -73,9 +65,7 @@ class RlInferNodeBase : public rclcpp::Node {
     gt_recv_mono_ = mono_now();
     ++gt_msg_count_;
   }
-  // One-line GT feed status for the engage-BLOCKED warning: distinguishes
-  // "never received ANY message" (wrong topic / publisher down) from "stale"
-  // (bursty/intermittent feed). Task nodes set gt_topic_desc_ at startup.
+  // GT feed status line: distinguishes never-received from stale.
   std::string gt_feed_status() const {
     if (gt_msg_count_ == 0)
       return "feed '" + gt_topic_desc_ + "': ZERO messages ever received — "
@@ -130,6 +120,9 @@ class RlInferNodeBase : public rclcpp::Node {
   int fsm_state_ = 0;
   std::string active_source_ = "none";
   bool was_active_ = false;
+  // Set on mid-flight disengage due to stale obs; must NOT auto-clear —
+  // re-engagement requires a fresh FSM/source command (see tick()).
+  bool failsafe_latched_ = false;
 
   int handoff_neutral_frames_ = 25;
   double handoff_hover_thrust_ = 0.26;

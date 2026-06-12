@@ -1,12 +1,7 @@
 // hover_node.cpp: C++ port of rl_infer/hover_jax_node.py (HoverJaxNode).
-//
-// Same node name, parameters, topics and behavior as the Python node, so it
-// is a drop-in replacement driven by the same hover_jax_params.yaml. Loads
-// the .npw weights exported next to the .pkl checkpoint
-// (rl_infer/scripts/export_policy_cpp.py).
-//
-// gt_source: "odom" (gz SITL) | "pose"/"vrpn" (mocap). The deprecated "px4"
-// EKF path is NOT ported (deploy never uses it) — the node refuses to start.
+// Drop-in replacement driven by the same hover_jax_params.yaml; loads the
+// .npw weights exported next to the .pkl checkpoint. gt_source: "odom"
+// (gz SITL) | "pose"/"vrpn" (mocap); the deprecated "px4" path is not ported.
 
 #include <memory>
 #include <stdexcept>
@@ -55,11 +50,9 @@ class HoverCppNode : public RlInferNodeBase {
     declare_parameter<std::string>("gt_source", "odom");
     declare_parameter<std::string>("gt_pose_topic",
                                    "/model/charpi_vision_0/odometry");
-    // Min stamp dt for the velocity/ang-vel finite-diff. Real VRPN clients
-    // emit burst near-duplicates (~1mm REAL pose delta, stamps 0.01-1 ms
-    // apart -> 5-80 m/s obs spikes; measured in rec_20260611_185438). Below
-    // the floor the pose is stored but the previous velocity kept. Half the
-    // 120Hz frame period; gz odom (125Hz) and mocap frames always pass.
+    // Min stamp dt for the velocity/ang-vel finite-diff: guards VRPN burst
+    // near-duplicates that spike the obs. Below the floor the pose is stored
+    // but the previous velocity kept. Half the 120Hz frame period.
     declare_parameter<double>("gt_min_dt", 0.004);
     gt_min_dt_ = get_parameter("gt_min_dt").as_double();
 
@@ -122,9 +115,8 @@ class HoverCppNode : public RlInferNodeBase {
     if (debug_net_input_) log_network_input(obs);
   }
 
-  // Python parity: hover_jax_node._log_network_orientation_debug — a 1 Hz
-  // INFO line decoding the policy input (enabled by yaml
-  // debug_network_input_orientation).
+  // 1 Hz INFO line decoding the policy input (Python parity:
+  // _log_network_orientation_debug).
   void log_network_input(const float* obs) {
     const double now = mono_now();
     if (now - last_dbg_log_mono_ < 1.0) return;
@@ -168,9 +160,8 @@ class HoverCppNode : public RlInferNodeBase {
     gt_vel_.setZero();
     has_gt_stamp_ = false;
     if (gt_ready_) {
-      // Capture the engage pose (world ENU): the anchor for hold/relative.
-      // Seed the target with it in EVERY mode so the drone holds in place
-      // until the first sequence pose arrives.
+      // Engage pose (world ENU) anchors hold/relative; seed the target in
+      // EVERY mode so the drone holds until the first sequence pose arrives.
       engage_yaw_ = quat_wxyz_yaw(gt_quat_wxyz_);
       engage_pos_ = gt_pos_;
       has_engage_ = true;
@@ -194,8 +185,7 @@ class HoverCppNode : public RlInferNodeBase {
             {"last_action", {27, 4}}};
   }
 
-  // Python parity: the two debug terms hover/task.py derives from the obs
-  // (body->world via rot_mat_w, then ENU->NED swap).
+  // Debug terms derived from the obs (body->world via rot_mat_w, ENU->NED).
   std::vector<std::pair<std::string, std::vector<float>>> derived_dbg_terms(
       const float* obs) const override {
     Eigen::Matrix3f rot;
@@ -227,10 +217,9 @@ class HoverCppNode : public RlInferNodeBase {
                 ckpt.c_str(), policy_.arch_name());
   }
 
-  // Common ground-truth sink (odom + pose/vrpn): world ENU position,
-  // Hamilton wxyz attitude. Velocity finite-differenced from the clean GT
-  // position with the REAL message dt; body angular velocity from the
-  // quaternion finite-diff:  omega_b = 2 * (q_prev^-1 ⊗ q_now).xyz / dt.
+  // GT sink (odom + pose/vrpn): world ENU position, Hamilton wxyz attitude.
+  // Velocity from position finite-diff with the REAL message dt; body
+  // ang-vel from quaternion finite-diff: omega_b = 2*(q_prev^-1 ⊗ q_now).xyz/dt.
   void store_gt(const Vec3& new_pos, const Vec4& new_q, double t_sec) {
     if (gt_ready_ && has_gt_stamp_) {
       const double dt = t_sec - gt_stamp_;
@@ -269,8 +258,8 @@ class HoverCppNode : public RlInferNodeBase {
     const auto& q = msg->pose.orientation;
     if (target_mode_ == "relative") {
       if (!has_engage_) return;
-      // XY = engage XY + the target's NED offset (NED N=ENU y, E=ENU x);
-      // Z = the target's absolute altitude (-NED down). Keep engage heading.
+      // XY = engage XY + target's NED offset (N=ENU y, E=ENU x);
+      // Z = absolute altitude (-NED down). Keep engage heading.
       const double pose[6] = {engage_pos_[0] + p.y, engage_pos_[1] + p.x,
                               -p.z, 0.0, 0.0, engage_yaw_};
       task_->set_target_policy_pose(pose);

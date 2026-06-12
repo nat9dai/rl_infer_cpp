@@ -45,8 +45,7 @@ RlInferNodeBase::RlInferNodeBase(const std::string& node_name)
 void RlInferNodeBase::finish_setup() {
   obs_buf_.assign(num_obs(), 0.0f);
 
-  // Warm-up: one throwaway inference so the first engaged tick pays no
-  // first-call cost (page faults, lazy BLAS init). Nothing is published.
+  // Throwaway inference so the first engaged tick pays no first-call cost.
   const double t0 = mono_now();
   infer_raw(obs_buf_.data());
   RCLCPP_INFO(get_logger(),
@@ -56,20 +55,18 @@ void RlInferNodeBase::finish_setup() {
               "inference backend = C++/Eigen (rl_infer_cpp — no Python at "
               "runtime; same MLP math as the deployed NumPy backend)");
 
-  // Readiness heartbeat (commander rrr/ggg interlock): publish state_ready()
-  // at 10 Hz on /rl/ready/<required_source>. The commander's own GT-feed
-  // check runs in a different process and cannot see whether THIS node's obs
-  // subscription is matched/receiving (DDS discovery is per-process;
-  // 2026-06-11 real flight: commander's feed live, gate node starved at zero
-  // messages). Also a liveness heartbeat: a dead/stalled node stops
-  // publishing and the commander refuses on staleness.
+  // Readiness heartbeat (commander rrr/ggg interlock) at 10 Hz: the commander
+  // cannot see THIS node's subscription state (DDS discovery is per-process),
+  // and a dead node going silent reads as not-ready (staleness).
   pub_ready_ = create_publisher<std_msgs::msg::Bool>(
       "/rl/ready/" + (required_source_.empty() ? std::string("any")
                                                : required_source_),
       10);
+  // Reports not-ready while the fail-safe latch is set, so the commander
+  // refuses rrr/ggg until an operator reset (iii/lll).
   ready_timer_ = create_wall_timer(std::chrono::milliseconds(100), [this] {
     std_msgs::msg::Bool m;
-    m.data = state_ready();
+    m.data = state_ready() && !failsafe_latched_;
     pub_ready_->publish(m);
   });
 
@@ -86,11 +83,40 @@ void RlInferNodeBase::tick() {
       required_source_.empty() || active_source_ == required_source_;
   const bool commanded = fsm_state_ == FSM_TRAJ && source_ok;
   const bool obs_ready = state_ready();
-  const bool active = commanded && obs_ready;
+  bool active = commanded && obs_ready;
+
+  // Fail-safe LATCH: after a mid-flight disengage on stale obs, do NOT
+  // auto-re-engage when the feed returns (the drone may be far out of
+  // distribution). Requires a fresh operator command (FSM leaves TRAJ or
+  // the source changes).
+  if (failsafe_latched_) {
+    if (!commanded) {
+      failsafe_latched_ = false;
+      RCLCPP_INFO(get_logger(),
+                  "obs fail-safe latch cleared by operator command — RL may "
+                  "be engaged again");
+    } else {
+      active = false;
+      const double now = mono_now();
+      if (now - gt_block_warn_mono_ > 2.0) {
+        gt_block_warn_mono_ = now;
+        RCLCPP_ERROR(get_logger(),
+                     "RL engage LATCHED OUT after mid-flight obs fail-safe — "
+                     "NOT re-engaging automatically; publishing NEUTRAL HOVER "
+                     "until an operator command (iii/lll). %s",
+                     gt_feed_status().c_str());
+      }
+      was_active_ = false;
+      // CONTINUOUS neutral hover while latched: PX4 stays in body-rate
+      // offboard (FSM still TRAJ); going silent leaves it executing the
+      // last latched command forever.
+      publish_neutral_hover();
+      return;
+    }
+  }
 
   if (commanded && !obs_ready) {
-    // SAFETY: commanded (rrr/ggg) but the obs source is missing/stale — do
-    // not run the policy on dead state. Warn the operator (throttled).
+    // Commanded but obs missing/stale: do not run the policy on dead state.
     const double now = mono_now();
     if (now - gt_block_warn_mono_ > 2.0) {
       gt_block_warn_mono_ = now;
@@ -103,12 +129,25 @@ void RlInferNodeBase::tick() {
 
   if (!active) {
     if (was_active_) {
-      // Just disengaged -> neutral-hover burst so the last (often high-
-      // thrust) command can't keep climbing through the offboard mode switch.
+      // Just disengaged: neutral-hover burst so the last (often high-thrust)
+      // command can't persist through the offboard mode switch.
       handoff_remaining_ = handoff_neutral_frames_;
+      if (commanded && !obs_ready) {
+        // MID-FLIGHT fail-safe (still commanded, obs died) -> latch.
+        failsafe_latched_ = true;
+        RCLCPP_ERROR(get_logger(),
+                     "MID-FLIGHT OBS FAIL-SAFE: policy disengaged (%s). "
+                     "Re-engagement is LATCHED OUT until a fresh operator "
+                     "command.", gt_feed_status().c_str());
+      }
     }
     was_active_ = false;
-    if (handoff_remaining_ > 0) {
+    if (commanded) {
+      // We own the rates topic (PX4 in body-rate offboard): while blocked,
+      // publish neutral hover CONTINUOUSLY — going silent leaves PX4
+      // executing a stale command indefinitely.
+      publish_neutral_hover();
+    } else if (handoff_remaining_ > 0) {
       --handoff_remaining_;
       publish_neutral_hover();
     }

@@ -1,10 +1,8 @@
-// gate_task.hpp: C++ port of rl_infer/gate/task.py (GateScene, GateTaskLogic,
-// compute_gate_obs). Pure logic, no ROS. Double math, float32 obs output.
-//
+// gate_task.hpp: C++ port of rl_infer/gate/task.py (GateScene, GateTaskLogic).
+// Pure logic, no ROS. Double math, float32 obs output.
 // 28-D obs: vel_b(3) roll_pitch(2) accel_b(3) corners_b(12) goal_b(3)
 //           prev_action(4) cg_passed(1)
-//
-// Deploy-config env vars (same names/defaults as the Python task):
+// Env vars (same names/defaults as the Python task):
 //   GATE_THRUST_REMAP (default 1; the launch deploys with 0)
 //   GATE_MAX_RATE_ROLL/PITCH/YAW (defaults 6.0; the launch deploys 4/2.5/3)
 //   GATE_SLEW (default 1), GATE_SLEW_ROLL/PITCH/YAW (110/50/25 rad/s²)
@@ -101,15 +99,21 @@ class GateTaskLogic {
   }
 
   // Build the 28-D obs; quat in Hamilton wxyz (converted internally to xyzw).
-  // Mutates the cross-step state (accel finite-diff, cg_passed) exactly like
-  // GateTaskLogic.build_obs_from_state.
+  // Mutates cross-step state (accel finite-diff, cg_passed). accel_w_ext:
+  // optional external ENU acceleration (e.g. PX4 EKF) — skips the velocity
+  // finite-difference, which spikes on gappy mocap.
   void build_obs(const Vec3& position_w, const Vec3& velocity_w,
                  const Vec4& quat_wxyz, const float last_action[NUM_GATE_ACT],
-                 float out[NUM_GATE_OBS]) {
+                 float out[NUM_GATE_OBS],
+                 const Vec3* accel_w_ext = nullptr) {
     const Vec4 quat = wxyz_to_xyzw(quat_wxyz);
 
     Vec3 accel_w = Vec3::Zero();
-    if (has_prev_vel_) accel_w = (velocity_w - prev_vel_w_) / ctrl_dt_;
+    if (accel_w_ext != nullptr) {
+      accel_w = *accel_w_ext;
+    } else if (has_prev_vel_) {
+      accel_w = (velocity_w - prev_vel_w_) / ctrl_dt_;
+    }
     if (accel_lpf_alpha_ < 1.0) {
       if (!has_accel_filt_) {
         accel_filt_ = accel_w;
