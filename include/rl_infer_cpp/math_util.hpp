@@ -153,6 +153,16 @@ inline Vec4 euler_to_quat_xyzw(double roll, double pitch, double yaw) {
 // Hamilton [w,x,y,z] -> scalar-last [x,y,z,w].
 inline Vec4 wxyz_to_xyzw(const Vec4& q) { return Vec4(q[1], q[2], q[3], q[0]); }
 
+// Quaternion product q ⊗ r, scalar-last [x,y,z,w] (compose r in q's frame).
+inline Vec4 quat_mul_xyzw(const Vec4& q, const Vec4& r) {
+  const double x = q[0], y = q[1], z = q[2], w = q[3];
+  const double x2 = r[0], y2 = r[1], z2 = r[2], w2 = r[3];
+  return Vec4(w * x2 + x * w2 + y * z2 - z * y2,
+              w * y2 - x * z2 + y * w2 + z * x2,
+              w * z2 + x * y2 - y * x2 + z * w2,
+              w * w2 - x * x2 - y * y2 - z * z2);
+}
+
 // Yaw of an [x,y,z,w] quaternion (GateScene.gazebo_pose yaw formula).
 inline double quat_xyzw_yaw(const Vec4& q) {
   const double qx = q[0], qy = q[1], qz = q[2], qw = q[3];

@@ -19,6 +19,12 @@ constexpr int NUM_GATE_OBS = 28;
 constexpr int NUM_GATE_ACT = 4;
 constexpr double GATE_WIDTH = 0.60;
 constexpr double GATE_HEIGHT = 0.25;
+// clean_passed (debug only): drone collision box vs gate frame slab.
+// Verbatim from gate_traversal.py — gate slab + Charpi body box 327x327x127 mm.
+constexpr double GATE_DEPTH = 0.01;
+constexpr double DRONE_BOX_HALF_X = 0.327 / 2.0;
+constexpr double DRONE_BOX_HALF_Y = 0.327 / 2.0;
+constexpr double DRONE_BOX_HALF_Z = 0.127 / 2.0;
 constexpr double GATE_GRAVITY = 9.81;
 constexpr double GATE_MIN_THROTTLE = 0.15;
 constexpr double GATE_MAX_THROTTLE = 0.40;
@@ -50,16 +56,6 @@ struct GateScene {
     s.goal_pos = s.gate_pos + quat_apply_xyzw(s.gate_quat, goal_local);
     return s;
   }
-
-  // Rebuild with a new roll about the SAME fixed normal yaw (/gate/set_roll).
-  static GateScene with_roll(const GateScene& base, double roll, double yaw,
-                             const Vec3& goal_local) {
-    GateScene s;
-    s.gate_pos = base.gate_pos;
-    s.gate_quat = euler_to_quat_xyzw(roll, 0.0, yaw);
-    s.goal_pos = s.gate_pos + quat_apply_xyzw(s.gate_quat, goal_local);
-    return s;
-  }
 };
 
 class GateTaskLogic {
@@ -84,6 +80,10 @@ class GateTaskLogic {
   void set_scene(const GateScene& scene) { scene_ = scene; }
   const GateScene& scene() const { return scene_; }
   bool cg_passed() const { return cg_passed_; }
+  // Debug-only (not an obs): CG through the opening AND the drone box never
+  // hit the gate frame — the env's gate_passed "clean pass" eval metric.
+  bool clean_passed() const { return clean_passed_; }
+  bool gate_collide() const { return gate_collide_; }
 
   void reset() {
     has_prev_vel_ = false;
@@ -96,6 +96,12 @@ class GateTaskLogic {
     br_.setZero();
     br_dot_.setZero();
     prev_br_cmd_.setZero();
+    clean_passed_ = false;
+    gate_missed_ = false;
+    cp_cg_passed_ = false;
+    gate_collide_ = false;
+    cp_has_prev_ = false;
+    cp_prev_xg_ = 0.0;
   }
 
   // Build the 28-D obs; quat in Hamilton wxyz (converted internally to xyzw).
@@ -125,6 +131,7 @@ class GateTaskLogic {
     }
 
     update_cg_passed(position_w);
+    update_clean_passed(position_w, quat);   // debug only
 
     int k = 0;
     // 1) body-frame linear velocity
@@ -220,6 +227,72 @@ class GateTaskLogic {
     has_prev_xg_ = true;
   }
 
+  // ── clean_passed (debug only) — port of gate_traversal.py gate_passed ──────
+  // 8 drone-box corners in gate-local frame.
+  void box_corners_in_gate(const Vec3& pos, const Vec4& quat_xyzw,
+                           Vec3 out[8]) const {
+    static const double sx[8] = {1, 1, 1, 1, -1, -1, -1, -1};
+    static const double sy[8] = {1, 1, -1, -1, 1, 1, -1, -1};
+    static const double sz[8] = {1, -1, 1, -1, 1, -1, 1, -1};
+    for (int i = 0; i < 8; ++i) {
+      const Vec3 cb(sx[i] * DRONE_BOX_HALF_X, sy[i] * DRONE_BOX_HALF_Y,
+                    sz[i] * DRONE_BOX_HALF_Z);
+      const Vec3 cw = pos + quat_apply_xyzw(quat_xyzw, cb);
+      out[i] = quat_rotate_inverse_xyzw(scene_.gate_quat, cw - scene_.gate_pos);
+    }
+  }
+
+  // Box-vs-frame collision: (A) corner in slab but outside opening, or
+  // (B) corner swept through the gate plane outside the opening.
+  static bool detect_box_collision(const Vec3 prev_g[8], const Vec3 new_g[8]) {
+    constexpr double hw = GATE_WIDTH / 2.0, hh = GATE_HEIGHT / 2.0;
+    for (int i = 0; i < 8; ++i) {
+      const bool in_slab = std::abs(new_g[i][0]) < (GATE_DEPTH / 2.0);
+      const bool outside_now =
+          std::abs(new_g[i][1]) > hw || std::abs(new_g[i][2]) > hh;
+      if (in_slab && outside_now) return true;
+      if ((prev_g[i][0] * new_g[i][0]) < 0.0) {
+        const double denom = new_g[i][0] - prev_g[i][0];
+        const double safe = std::abs(denom) < 1e-9 ? 1e-9 : denom;
+        const double t = -prev_g[i][0] / safe;
+        const double y_at = prev_g[i][1] + t * (new_g[i][1] - prev_g[i][1]);
+        const double z_at = prev_g[i][2] + t * (new_g[i][2] - prev_g[i][2]);
+        if (std::abs(y_at) > hw || std::abs(z_at) > hh) return true;
+      }
+    }
+    return false;
+  }
+
+  void update_clean_passed(const Vec3& pos, const Vec4& quat_xyzw) {
+    Vec3 new_g[8];
+    box_corners_in_gate(pos, quat_xyzw, new_g);
+    bool collide = false;
+    if (cp_has_prev_) {
+      Vec3 prev_g[8];
+      box_corners_in_gate(cp_prev_pos_, cp_prev_quat_, prev_g);
+      collide = detect_box_collision(prev_g, new_g);
+    }
+    gate_collide_ = gate_collide_ || collide;
+
+    const Vec3 drone_g =
+        quat_rotate_inverse_xyzw(scene_.gate_quat, pos - scene_.gate_pos);
+    const double x_g = drone_g[0], y_g = drone_g[1], z_g = drone_g[2];
+    const bool crossed = cp_has_prev_ && (cp_prev_xg_ < 0.0) && (x_g >= 0.0);
+    const bool within = (std::abs(y_g) < GATE_WIDTH / 2.0)
+                        && (std::abs(z_g) < GATE_HEIGHT / 2.0);
+    const bool first_crossing = crossed && !cp_cg_passed_ && !gate_missed_;
+    const bool cg_just_passed = first_crossing && within;
+    const bool cg_just_missed = first_crossing && !within;
+    cp_cg_passed_ = cp_cg_passed_ || cg_just_passed;
+    clean_passed_ = clean_passed_ || (cg_just_passed && !collide);
+    gate_missed_ = gate_missed_ || cg_just_missed || (collide && !gate_missed_);
+
+    cp_prev_pos_ = pos;
+    cp_prev_quat_ = quat_xyzw;
+    cp_prev_xg_ = x_g;
+    cp_has_prev_ = true;
+  }
+
   // charpi_physics_gz approx_substep, BR_FF=0 (matches _filter_body_rates).
   Vec3 filter_body_rates(const Vec3& br_ref) {
     for (int s = 0; s < BR_N_SUBSTEPS; ++s) {
@@ -253,6 +326,12 @@ class GateTaskLogic {
   Vec3 accel_filt_ = Vec3::Zero();
   Vec3 br_ = Vec3::Zero(), br_dot_ = Vec3::Zero();
   Vec3 prev_br_cmd_ = Vec3::Zero();
+  // clean_passed (debug) state
+  bool clean_passed_ = false, gate_missed_ = false, cp_cg_passed_ = false;
+  bool gate_collide_ = false, cp_has_prev_ = false;
+  double cp_prev_xg_ = 0.0;
+  Vec3 cp_prev_pos_ = Vec3::Zero();
+  Vec4 cp_prev_quat_ = Vec4(0, 0, 0, 1);
 };
 
 }  // namespace rl_infer_cpp
