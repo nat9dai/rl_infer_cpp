@@ -27,7 +27,7 @@ constexpr double DRONE_BOX_HALF_Y = 0.327 / 2.0;
 constexpr double DRONE_BOX_HALF_Z = 0.127 / 2.0;
 constexpr double GATE_GRAVITY = 9.81;
 constexpr double GATE_MIN_THROTTLE = 0.15;
-constexpr double GATE_MAX_THROTTLE = 0.40;
+constexpr double GATE_MAX_THROTTLE = 0.80;  // 2026-06-17: 0.40->0.80, match training MAX_THROTTLE (extended authority)
 constexpr double DEFAULT_GATE_ROLL = M_PI / 4.0;
 
 // Body-rate 2nd-order response model (charpi_physics_gz) for the optional
