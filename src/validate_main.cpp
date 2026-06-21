@@ -142,9 +142,6 @@ int replay(const std::string& vec_path, const std::string& npw_path) {
               dt.worst_cmd_step);
   const bool pass = dt.max_obs < 1e-5 && dt.max_raw < 1e-4 && dt.max_cmd < 1e-4;
   std::printf("  %s\n", pass ? "PASS" : "FAIL");
-  if (task == 1)  // cross-check the debug clean_passed flag (C++ side)
-    std::printf("  clean_passed=%d cg_passed=%d gate_collide=%d\n",
-                gate->clean_passed(), gate->cg_passed(), gate->gate_collide());
   return pass ? 0 : 1;
 }
 

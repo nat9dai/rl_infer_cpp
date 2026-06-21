@@ -14,7 +14,6 @@
 #include <nav_msgs/msg/odometry.hpp>
 #include <px4_msgs/msg/vehicle_attitude.hpp>
 #include <px4_msgs/msg/vehicle_local_position.hpp>
-#include <std_msgs/msg/bool.hpp>
 #include <tf2_msgs/msg/tf_message.hpp>
 
 #include "rl_infer_cpp/base_node.hpp"
@@ -121,8 +120,6 @@ class GateCppNode : public RlInferNodeBase {
           + gt_source + "'");
     }
 
-    pub_clean_ = create_publisher<std_msgs::msg::Bool>(
-        "/dbg/gate/clean_passed", 10);
     gt_topic_desc_ = gt_source + ":" + gt_topic;
     RCLCPP_INFO(get_logger(), "drone pose source=%s topic=%s child=%s",
                 gt_source.c_str(), gt_topic.c_str(), gt_child_frame_.c_str());
@@ -141,9 +138,6 @@ class GateCppNode : public RlInferNodeBase {
     } else {
       task_->build_obs(gt_pos_, gt_vel_, gt_quat_wxyz_, last_action_, obs);
     }
-    std_msgs::msg::Bool cp;            // debug only (not an obs)
-    cp.data = task_->clean_passed();
-    pub_clean_->publish(cp);
   }
 
   const float* infer_raw(const float* obs) override {
@@ -293,7 +287,6 @@ class GateCppNode : public RlInferNodeBase {
   std::shared_ptr<PolicyMlp> policy_;
   std::string gt_child_frame_;
 
-  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr pub_clean_;
   rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr sub_gt_tf_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_gt_pose_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_gate_pose_;
