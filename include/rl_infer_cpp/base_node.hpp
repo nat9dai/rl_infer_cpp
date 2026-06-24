@@ -104,6 +104,13 @@ class RlInferNodeBase : public rclcpp::Node {
   void publish_neutral_hover();
   void publish_rates(const RatesCommand& cmd, bool reset_integral);
   void publish_dbg(const float* obs, int n);
+  // Throttle notch (rank-2: real-side 8Hz throttle limit-cycle mitigation). RBJ
+  // biquad band-stop on cmd.thrust_z, active-inference path only (NOT neutral
+  // hover). Unity DC gain → hover trim + ~1-2Hz maneuver band pass untouched;
+  // only the ~8Hz limit-cycle is rejected (unlike a low-pass, no broadband lag).
+  // throttle_notch_freq<=0 disables (default). See setup_throttle_notch().
+  void setup_throttle_notch();
+  float apply_throttle_notch(float x);
 
   rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr sub_fsm_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr sub_source_;
@@ -132,6 +139,13 @@ class RlInferNodeBase : public rclcpp::Node {
   double gt_recv_mono_ = -1.0;
   double gt_block_warn_mono_ = 0.0;
   int64_t gt_msg_count_ = 0;
+
+  // Throttle-notch state/coeffs (a0-normalised RBJ band-stop, DF-II transposed).
+  double notch_freq_ = 0.0;  // Hz, <=0 disables
+  double notch_q_ = 3.0;     // ~3 → ~2.7Hz -3dB bandwidth at 8Hz (covers 7-9Hz)
+  double nb0_ = 1.0, nb1_ = 0.0, nb2_ = 0.0, na1_ = 0.0, na2_ = 0.0;
+  double nz1_ = 0.0, nz2_ = 0.0;
+  bool notch_primed_ = false;
 
   std::vector<float> obs_buf_;
 };

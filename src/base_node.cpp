@@ -1,5 +1,7 @@
 #include "rl_infer_cpp/base_node.hpp"
 
+#include <cmath>
+
 namespace rl_infer_cpp {
 
 RlInferNodeBase::RlInferNodeBase(const std::string& node_name)
@@ -10,6 +12,8 @@ RlInferNodeBase::RlInferNodeBase(const std::string& node_name)
   declare_parameter<int>("handoff_neutral_frames", 25);
   declare_parameter<double>("handoff_hover_thrust", 0.26);
   declare_parameter<double>("gt_timeout", 0.3);
+  declare_parameter<double>("throttle_notch_freq", 0.0);
+  declare_parameter<double>("throttle_notch_q", 3.0);
 
   drone_id_ = get_parameter("drone_id").as_int();
   inference_rate_ = get_parameter("inference_rate").as_double();
@@ -17,6 +21,9 @@ RlInferNodeBase::RlInferNodeBase(const std::string& node_name)
   handoff_neutral_frames_ = get_parameter("handoff_neutral_frames").as_int();
   handoff_hover_thrust_ = get_parameter("handoff_hover_thrust").as_double();
   gt_timeout_ = get_parameter("gt_timeout").as_double();
+  notch_freq_ = get_parameter("throttle_notch_freq").as_double();
+  notch_q_ = get_parameter("throttle_notch_q").as_double();
+  setup_throttle_notch();
 
   px4_ns_ = drone_id_ == 0 ? "/fmu/"
                            : "/px4_" + std::to_string(drone_id_) + "/fmu/";
@@ -158,6 +165,7 @@ void RlInferNodeBase::tick() {
     // Rising edge: fresh engagement. prev_action starts at zero (training).
     was_active_ = true;
     for (float& v : last_action_) v = 0.0f;
+    notch_primed_ = false;  // re-prime the throttle notch on fresh engagement
     on_inference_start();
   }
 
@@ -173,7 +181,9 @@ void RlInferNodeBase::tick() {
   t_msg.data = static_cast<float>(infer_s);
   pub_dbg_infer_time_->publish(t_msg);
 
-  const RatesCommand cmd = scale_action(raw);
+  RatesCommand cmd = scale_action(raw);
+  if (notch_freq_ > 0.0)
+    cmd.thrust_z = apply_throttle_notch(static_cast<float>(cmd.thrust_z));
   publish_rates(cmd, false);
 
   for (int i = 0; i < 4; ++i)
@@ -194,6 +204,39 @@ void RlInferNodeBase::publish_rates(const RatesCommand& cmd,
   msg.thrust_body[2] = static_cast<float>(-cmd.thrust_z);
   msg.reset_integral = reset_integral;
   pub_rates_->publish(msg);
+}
+
+void RlInferNodeBase::setup_throttle_notch() {
+  if (notch_freq_ <= 0.0 || inference_rate_ <= 0.0) return;
+  // RBJ band-stop (notch), a0-normalised. Unity gain at DC and Nyquist; deep
+  // null at notch_freq_ with -3dB bandwidth set by Q.
+  const double w0 = 2.0 * M_PI * notch_freq_ / inference_rate_;
+  const double c = std::cos(w0), s = std::sin(w0);
+  const double alpha = s / (2.0 * notch_q_);
+  const double a0 = 1.0 + alpha;
+  nb0_ = 1.0 / a0;
+  nb1_ = -2.0 * c / a0;
+  nb2_ = 1.0 / a0;
+  na1_ = -2.0 * c / a0;
+  na2_ = (1.0 - alpha) / a0;
+  RCLCPP_INFO(get_logger(),
+              "throttle notch ON: f0=%.1fHz Q=%.1f @ %.0fHz "
+              "(rank-2 8Hz limit-cycle mitigation)",
+              notch_freq_, notch_q_, inference_rate_);
+}
+
+float RlInferNodeBase::apply_throttle_notch(float x) {
+  // Prime state so a constant input passes unchanged (no engage transient).
+  if (!notch_primed_) {
+    nz1_ = (nb1_ + nb2_ - na1_ - na2_) * x;
+    nz2_ = (nb2_ - na2_) * x;
+    notch_primed_ = true;
+    return x;
+  }
+  const double y = nb0_ * static_cast<double>(x) + nz1_;
+  nz1_ = nb1_ * static_cast<double>(x) - na1_ * y + nz2_;
+  nz2_ = nb2_ * static_cast<double>(x) - na2_ * y;
+  return static_cast<float>(y);
 }
 
 void RlInferNodeBase::publish_neutral_hover() {
