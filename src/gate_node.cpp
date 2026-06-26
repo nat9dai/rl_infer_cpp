@@ -46,6 +46,11 @@ class GateCppNode : public RlInferNodeBase {
     // near-duplicates.
     declare_parameter<double>("gt_min_dt", 0.004);
     gt_min_dt_ = get_parameter("gt_min_dt").as_double();
+
+    declare_parameter<int>("action_history_steps", 1);
+    action_hist_steps_ = std::max(1, static_cast<int>(
+        get_parameter("action_history_steps").as_int()));
+    action_hist_.assign(action_hist_steps_ * NUM_GATE_ACT, 0.0f);
     // Aligns the PX4 EKF local frame with the scene frame (px4 source only);
     // calibrate /vrpn pose z vs vehicle_local_position -z on the ground.
     declare_parameter<std::vector<double>>("gt_pos_offset_enu",
@@ -120,23 +125,38 @@ class GateCppNode : public RlInferNodeBase {
           + gt_source + "'");
     }
 
-    gt_topic_desc_ = gt_source + ":" + gt_topic;
+    // Log the ACTUAL subscribed pose topic(s): in px4 mode the node reads the
+    // /fmu EKF topics, NOT gt_pose_topic (the unused non-px4 fallback string).
+    const std::string pose_topic = (gt_source == "px4")
+        ? (px4_ns_ + "out/vehicle_local_position(+attitude)")
+        : gt_topic;
+    gt_topic_desc_ = gt_source + ":" + pose_topic;
     RCLCPP_INFO(get_logger(), "drone pose source=%s topic=%s child=%s",
-                gt_source.c_str(), gt_topic.c_str(), gt_child_frame_.c_str());
+                gt_source.c_str(), pose_topic.c_str(), gt_child_frame_.c_str());
 
     load_policy();
     finish_setup();
   }
 
  protected:
-  int num_obs() const override { return NUM_GATE_OBS; }
+  int num_obs() const override {
+    return 24 + NUM_GATE_ACT * action_hist_steps_;  // H=1 -> 28
+  }
 
   void build_obs(float* obs) override {
+    // ring-shift the action history: prepend the most-recent action (last_action_),
+    // drop the oldest. H=1 -> action_hist_ == last_action_ (original behaviour).
+    for (int s = action_hist_steps_ - 1; s > 0; --s)
+      for (int i = 0; i < NUM_GATE_ACT; ++i)
+        action_hist_[s * NUM_GATE_ACT + i] =
+            action_hist_[(s - 1) * NUM_GATE_ACT + i];
+    for (int i = 0; i < NUM_GATE_ACT; ++i) action_hist_[i] = last_action_[i];
     if (use_ekf_) {
-      task_->build_obs(gt_pos_, gt_vel_, gt_quat_wxyz_, last_action_, obs,
-                       &ekf_acc_enu_);
+      task_->build_obs(gt_pos_, gt_vel_, gt_quat_wxyz_, action_hist_.data(),
+                       action_hist_steps_, obs, &ekf_acc_enu_);
     } else {
-      task_->build_obs(gt_pos_, gt_vel_, gt_quat_wxyz_, last_action_, obs);
+      task_->build_obs(gt_pos_, gt_vel_, gt_quat_wxyz_, action_hist_.data(),
+                       action_hist_steps_, obs);
     }
   }
 
@@ -169,6 +189,7 @@ class GateCppNode : public RlInferNodeBase {
     task_->reset();
     gt_vel_.setZero();
     has_gt_stamp_ = false;
+    std::fill(action_hist_.begin(), action_hist_.end(), 0.0f);  // clear action history
     RCLCPP_INFO(get_logger(), "gate policy engaged — task state reset");
   }
 
@@ -179,8 +200,8 @@ class GateCppNode : public RlInferNodeBase {
             {"accel_b", {5, 3}},
             {"corners_b", {8, 12}},
             {"goal_b", {20, 3}},
-            {"prev_action", {23, 4}},
-            {"cg_passed", {27, 1}}};
+            {"prev_action", {23, NUM_GATE_ACT * action_hist_steps_}},
+            {"cg_passed", {23 + NUM_GATE_ACT * action_hist_steps_, 1}}};
   }
 
  private:
@@ -197,8 +218,16 @@ class GateCppNode : public RlInferNodeBase {
           "gate_jax_node requires 'checkpoint_path' (the gate policy).");
     policy_ = std::make_shared<PolicyMlp>();
     policy_->load(resolve_ckpt(ckpt));
-    if (static_cast<int>(policy_->num_obs()) != NUM_GATE_OBS)
-      throw std::runtime_error("gate checkpoint num_obs mismatch");
+    if (static_cast<int>(policy_->num_obs()) != num_obs())
+      throw std::runtime_error(
+          "gate checkpoint num_obs (" + std::to_string(policy_->num_obs())
+          + ") != expected " + std::to_string(num_obs())
+          + " for action_history_steps=" + std::to_string(action_hist_steps_)
+          + " — set action_history_steps to match the policy (1 for a 28-D policy).");
+    RCLCPP_INFO(get_logger(),
+                "action_history_steps=%d -> obs=%d (%s)", action_hist_steps_,
+                num_obs(), action_hist_steps_ == 1 ? "single prev_action"
+                                                   : "stacked action history");
     RCLCPP_INFO(get_logger(), "C++ gate policy loaded from %s (%s)",
                 resolve_ckpt(ckpt).c_str(), policy_->arch_name());
   }
@@ -285,6 +314,12 @@ class GateCppNode : public RlInferNodeBase {
   Vec3 goal_local_ = Vec3(1.8, 0.0, -0.4);
   std::unique_ptr<GateTaskLogic> task_;
   std::shared_ptr<PolicyMlp> policy_;
+  // Action-history obs: 1 = original single prev_action (28-D, default). H>1 stacks
+  // the last H actions (most-recent first) -> obs = 24 + 4*H. MUST match the policy's
+  // training (action_history_steps); load_policy enforces it. Switch back freely by
+  // setting this to 1 + pointing checkpoint_path at a 1-step (28-D) policy.
+  int action_hist_steps_ = 1;
+  std::vector<float> action_hist_;
   std::string gt_child_frame_;
 
   rclcpp::Subscription<tf2_msgs::msg::TFMessage>::SharedPtr sub_gt_tf_;

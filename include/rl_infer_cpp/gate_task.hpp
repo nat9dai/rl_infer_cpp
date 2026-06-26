@@ -92,9 +92,12 @@ class GateTaskLogic {
   // Mutates cross-step state (accel finite-diff, cg_passed). accel_w_ext:
   // optional external ENU acceleration (e.g. PX4 EKF) — skips the velocity
   // finite-difference, which spikes on gappy mocap.
+  // action_hist: flattened action history (hist_steps*NUM_GATE_ACT, most-recent
+  // first). hist_steps=1 -> the original single prev_action. out width = 24 +
+  // NUM_GATE_ACT*hist_steps (sized by the caller).
   void build_obs(const Vec3& position_w, const Vec3& velocity_w,
-                 const Vec4& quat_wxyz, const float last_action[NUM_GATE_ACT],
-                 float out[NUM_GATE_OBS],
+                 const Vec4& quat_wxyz, const float* action_hist, int hist_steps,
+                 float* out,
                  const Vec3* accel_w_ext = nullptr) {
     const Vec4 quat = wxyz_to_xyzw(quat_wxyz);
 
@@ -154,8 +157,8 @@ class GateTaskLogic {
         quat_rotate_inverse_xyzw(quat, scene_.goal_pos - position_w);
     for (int i = 0; i < 3; ++i) out[k++] = static_cast<float>(goal_b[i]);
 
-    // 6) previous action
-    for (int i = 0; i < NUM_GATE_ACT; ++i) out[k++] = last_action[i];
+    // 6) action history (hist_steps * 4, most-recent first)
+    for (int i = 0; i < hist_steps * NUM_GATE_ACT; ++i) out[k++] = action_hist[i];
 
     // 7) sticky cg_passed flag
     out[k++] = cg_passed_ ? 1.0f : 0.0f;

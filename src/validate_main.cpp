@@ -110,7 +110,7 @@ int replay(const std::string& vec_path, const std::string& npw_path) {
     if (task == 0)
       hover->build_obs(pos, vel, quat, angvel, last_action, obs.data());
     else
-      gate->build_obs(pos, vel, quat, last_action, obs.data());
+      gate->build_obs(pos, vel, quat, last_action, 1, obs.data());  // hist_steps=1 (28-D validator)
 
     for (int i = 0; i < num_obs; ++i)
       dt.track(dt.max_obs, dt.worst_obs_step,
