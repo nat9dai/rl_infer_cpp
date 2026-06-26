@@ -1,7 +1,10 @@
 // hover_node.cpp: C++ port of rl_infer/hover_jax_node.py (HoverJaxNode).
 // Drop-in replacement driven by the same hover_jax_params.yaml; loads the
-// .npw weights exported next to the .pkl checkpoint. gt_source: "odom"
-// (gz SITL) | "pose"/"vrpn" (mocap); the deprecated "px4" path is not ported.
+// .npw weights exported next to the .pkl checkpoint. gt_source:
+//   "px4"        -> PX4 EKF vehicle_odometry (DEFAULT; SITL + matches the obs
+//                   frame the real drone's EKF feeds; no gz odom bridge needed)
+//   "pose"/"vrpn"-> geometry_msgs/PoseStamped (mocap; real_flight=true)
+//   "odom"       -> nav_msgs/Odometry (gz ground-truth bridge, legacy SITL)
 
 #include <memory>
 #include <stdexcept>
@@ -11,6 +14,7 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <px4_msgs/msg/vehicle_odometry.hpp>
 
 #include "rl_infer_cpp/base_node.hpp"
 #include "rl_infer_cpp/hover_task.hpp"
@@ -47,7 +51,7 @@ class HoverCppNode : public RlInferNodeBase {
         "target_pose", {0.0, 0.0, 1.5, 0.0, 0.0, 0.0});
     declare_parameter<std::string>("target_mode", "hold");
     declare_parameter<bool>("hold_position_on_engage", true);
-    declare_parameter<std::string>("gt_source", "odom");
+    declare_parameter<std::string>("gt_source", "px4");
     declare_parameter<std::string>("gt_pose_topic",
                                    "/model/charpi_vision_0/odometry");
     // Min stamp dt for the velocity/ang-vel finite-diff: guards VRPN burst
@@ -83,24 +87,39 @@ class HoverCppNode : public RlInferNodeBase {
 
     gt_source_ = get_parameter("gt_source").as_string();
     const std::string gt_topic = get_parameter("gt_pose_topic").as_string();
-    if (gt_source_ == "odom") {
+    if (gt_source_ == "px4") {
+      // PX4 EKF state from vehicle_odometry (NED/FRD), converted to the policy
+      // ENU/FLU frame — mirrors the Python base subscribe_vehicle_odometry so
+      // the SITL cpp path matches the deployed code. EKF velocity + the body-
+      // rate gyro are already smooth, so NO finite differencing (unlike the
+      // odom/pose GT sinks). gt_pose_topic is unused in this mode.
+      const std::string odom_topic = px4_ns_ + "out/vehicle_odometry";
+      sub_ekf_odom_ = create_subscription<px4_msgs::msg::VehicleOdometry>(
+          odom_topic, sensor_qos(),
+          std::bind(&HoverCppNode::ekf_odom_cb, this, std::placeholders::_1));
+      gt_topic_desc_ = "px4:" + odom_topic;
+      RCLCPP_INFO(get_logger(),
+                  "hover obs from PX4 EKF '%s' (vehicle_odometry -> ENU/FLU).",
+                  odom_topic.c_str());
+    } else if (gt_source_ == "odom") {
       sub_gt_odom_ = create_subscription<nav_msgs::msg::Odometry>(
           gt_topic, sensor_qos(),
           std::bind(&HoverCppNode::gt_odom_cb, this, std::placeholders::_1));
+      gt_topic_desc_ = gt_source_ + ":" + gt_topic;
+      RCLCPP_INFO(get_logger(),
+                  "hover obs from gz ground-truth odom '%s'.", gt_topic.c_str());
     } else if (gt_source_ == "pose" || gt_source_ == "vrpn") {
       sub_gt_pose_ = create_subscription<geometry_msgs::msg::PoseStamped>(
           gt_topic, sensor_qos(),
           std::bind(&HoverCppNode::gt_pose_cb, this, std::placeholders::_1));
+      gt_topic_desc_ = gt_source_ + ":" + gt_topic;
+      RCLCPP_INFO(get_logger(),
+                  "hover obs from mocap pose '%s'.", gt_topic.c_str());
     } else {
       throw std::runtime_error(
-          "hover_jax_node (cpp): gt_source must be odom|pose|vrpn — the "
-          "deprecated 'px4' EKF path is not ported (use the Python node).");
+          "hover_jax_node (cpp): gt_source must be px4|pose|vrpn|odom, got '"
+          + gt_source_ + "'");
     }
-    gt_topic_desc_ = gt_source_ + ":" + gt_topic;
-    RCLCPP_INFO(get_logger(),
-                "PX4 EKF feedback subs DISABLED (no /fmu/out/vehicle_odometry,"
-                " no /fmu/out/esc_status) — obs sourced from %s '%s'.",
-                gt_source_.c_str(), gt_topic.c_str());
 
     load_policy();
     finish_setup();
@@ -252,6 +271,21 @@ class HoverCppNode : public RlInferNodeBase {
              stamp_to_sec(msg->header.stamp));
   }
 
+  // PX4 EKF source (gt_source=px4): vehicle_odometry NED/FRD -> policy ENU/FLU,
+  // 1:1 with the Python base subscribe_vehicle_odometry. EKF velocity and the
+  // body-rate gyro (angular_velocity) are already smooth, so this fills the GT
+  // buffers directly — no finite differencing through store_gt.
+  void ekf_odom_cb(px4_msgs::msg::VehicleOdometry::ConstSharedPtr m) {
+    gt_pos_ = ned_to_enu_vec(Vec3(m->position[0], m->position[1], m->position[2]));
+    gt_vel_ = ned_to_enu_vec(Vec3(m->velocity[0], m->velocity[1], m->velocity[2]));
+    gt_quat_wxyz_ =
+        ned_frd_quat_to_enu_flu(Vec4(m->q[0], m->q[1], m->q[2], m->q[3]));
+    gt_ang_vel_ = frd_to_flu_vec(Vec3(
+        m->angular_velocity[0], m->angular_velocity[1], m->angular_velocity[2]));
+    gt_ready_ = true;
+    note_gt_received();  // obs-availability freshness (safety)
+  }
+
   void target_cb(geometry_msgs::msg::PoseStamped::ConstSharedPtr msg) {
     if (target_mode_ == "hold") return;  // sequence ignored
     const auto& p = msg->pose.position;
@@ -278,6 +312,7 @@ class HoverCppNode : public RlInferNodeBase {
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_target_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr sub_gt_odom_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr sub_gt_pose_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr sub_ekf_odom_;
 
   double gt_min_dt_ = 0.004;
   Vec3 gt_pos_ = Vec3::Zero(), gt_vel_ = Vec3::Zero(),
