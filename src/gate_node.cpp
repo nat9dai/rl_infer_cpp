@@ -70,10 +70,14 @@ class GateCppNode : public RlInferNodeBase {
     goal_local_ = Vec3(gl[0], gl[1], gl[2]);
     // Placeholder scene; the live gate pose sets it before any inference (the
     // safety gate blocks until then).
+    declare_parameter<double>("gate_max_throttle", 0.80);
     task_ = std::make_unique<GateTaskLogic>(
         GateScene{}, 1.0 / inference_rate_,
         get_parameter("accel_lpf_alpha").as_double(),
-        get_parameter("br_filter").as_bool());
+        get_parameter("br_filter").as_bool(),
+        get_parameter("gate_max_throttle").as_double());
+    RCLCPP_INFO(get_logger(), "gate_max_throttle=%.2f (action->throttle gain; MUST match training MAX_THROTTLE)",
+                get_parameter("gate_max_throttle").as_double());
 
     gate_pose_topic_ = get_parameter("gate_pose_topic").as_string();
     if (gate_pose_topic_.empty())

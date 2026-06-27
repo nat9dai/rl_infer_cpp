@@ -55,11 +55,14 @@ struct GateScene {
 class GateTaskLogic {
  public:
   GateTaskLogic(const GateScene& scene, double ctrl_dt, double accel_lpf_alpha,
-                bool br_filter)
+                bool br_filter, double max_throttle = 0.80)
       : scene_(scene),
         ctrl_dt_(ctrl_dt),
         br_filter_(br_filter),
         accel_lpf_alpha_(std::min(1.0, std::max(0.0, accel_lpf_alpha))) {
+    // max throttle = action->throttle gain knob; MUST match the policy's training
+    // MAX_THROTTLE (0.80 for s49/s50; 0.60 for s51). Clamp to a sane range.
+    max_throttle_ = std::min(0.80, std::max(GATE_MIN_THROTTLE + 0.05, max_throttle));
     max_rate_ = Vec3(env_double("GATE_MAX_RATE_ROLL", 6.0),
                      env_double("GATE_MAX_RATE_PITCH", 6.0),
                      env_double("GATE_MAX_RATE_YAW", 6.0));
@@ -172,7 +175,7 @@ class GateTaskLogic {
     for (int i = 0; i < 4; ++i)
       a[i] = std::min(1.0, std::max(-1.0, static_cast<double>(raw[i])));
     double thrust = GATE_MIN_THROTTLE
-        + (a[0] + 1.0) * 0.5 * (GATE_MAX_THROTTLE - GATE_MIN_THROTTLE);
+        + (a[0] + 1.0) * 0.5 * (max_throttle_ - GATE_MIN_THROTTLE);
     if (thrust_remap_on_) thrust = remap_throttle(thrust);
     Vec3 br_ref(a[1] * max_rate_[0], a[2] * max_rate_[1], a[3] * max_rate_[2]);
     Vec3 out = br_filter_ ? filter_body_rates(br_ref) : br_ref;
@@ -185,17 +188,17 @@ class GateTaskLogic {
     cmd.roll = out[0];
     cmd.pitch = out[1];
     cmd.yaw = out[2];
-    cmd.thrust_z = std::min(GATE_MAX_THROTTLE,
+    cmd.thrust_z = std::min(max_throttle_,
                             std::max(GATE_MIN_THROTTLE, thrust));
     return cmd;
   }
 
  private:
-  static double remap_throttle(double thr) {
+  double remap_throttle(double thr) const {
     constexpr double c0 = 1.613356, c1 = -2.856781, c2 = 2.09172,
                      c3 = -0.106211;
     const double t = c0 * thr * thr * thr + c1 * thr * thr + c2 * thr + c3;
-    return std::min(GATE_MAX_THROTTLE, std::max(GATE_MIN_THROTTLE, t));
+    return std::min(max_throttle_, std::max(GATE_MIN_THROTTLE, t));
   }
 
   // Sticky gate-pass: CG sweeps gate-local x from <0 to >=0 inside the opening.
@@ -235,6 +238,7 @@ class GateTaskLogic {
   double accel_lpf_alpha_;
   Vec3 max_rate_, slew_;
   bool slew_on_ = true, thrust_remap_on_ = true;
+  double max_throttle_ = 0.80;  // action->throttle gain knob (set from gate_max_throttle param)
 
   // cross-step state
   bool has_prev_vel_ = false;
